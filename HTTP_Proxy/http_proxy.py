@@ -6,7 +6,7 @@ import re
 
 
 BUFSIZE = 1024
-TIMEOUT = 10
+TIMEOUT = 60
 
 HOST_PATTERN = re.compile("\n[ ]*Host[ ]*:[ ]*([^ \r\n]+)", re.IGNORECASE)
 PORT_PATTERN = re.compile(":(\d+)")
@@ -15,6 +15,8 @@ HTTP_HEADER_END_PATTERN = re.compile("(\r\n\r\n)|(\n\n)")
 HTTP_LINE_SEP_PATTERN = re.compile("(\r\n)|(\n)")
 CONNECTION_PATTERN = re.compile('[ ]*Connection[ ]*:[^\r\n]*(\r\n|\n)', re.IGNORECASE)
 PROXY__PATTERN = re.compile("[ ]*Proxy-connection[ ]*:[ ]*keep-alive[ ]*(\r\n|\n)", re.IGNORECASE)
+HTTP_VERSION_PATTERN = re.compile("HTTP/1.1")
+
 
 class WrongHTTPFormatException(Exception):
     def __init(self, value):
@@ -57,7 +59,7 @@ def get_server_address(http_header):
             port = match.group(1)
     else:
         raise WrongHTTPFormatException("Incorrect Host field format")
-    return host, port
+    return host, int(port)
 
 
 def modify_http_header(http_header):
@@ -66,6 +68,7 @@ def modify_http_header(http_header):
     header = CONNECTION_PATTERN.sub('', header)
     header += "Connection: close\r\n"
     header = PROXY__PATTERN.sub('Proxy-connection: close', header)
+    header = HTTP_VERSION_PATTERN.sub("HTTP/1.0", header)
 
     return header + "\r\n" + payload
 
@@ -100,20 +103,16 @@ def wait_client(port):
             logging.debug(e)
 
 
-def handle_client(client_conn):
+def http_relay(address, http_header, client_conn):
     try:
-        client_conn.settimeout(TIMEOUT)
-
-        http_header = read_full_http_header(client_conn)
-        first_line = get_http_first_line(http_header)
-        logging.info(">>> %s", first_line)
-
         http_header = modify_http_header(http_header)
 
-        host, port = get_server_address(http_header)
         server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_conn.connect(address)
+        # Set timeout here just in case either server or client doesn't close their socket.
+        # Theoretically, they should close.
+        client_conn.settimeout(TIMEOUT)
         server_conn.settimeout(TIMEOUT)
-        server_conn.connect((host, port))
 
         t = threading.Thread(target=fetch_response, args=(server_conn, client_conn))
         t.daemon = True
@@ -123,6 +122,48 @@ def handle_client(client_conn):
         while data:
             server_conn.sendall(data)
             data = client_conn.recv(BUFSIZE)
+
+        server_conn.shutdown(socket.SHUT_WR)
+
+        # This is essential for elegant teardown.
+        t.join()
+    except Exception as e:
+        logging.debug(e)
+    finally:
+        client_conn.close()
+        try:
+            server_conn.close()
+        except Exception as e:
+            logging.debug(e)
+
+
+def http_connect_tunneling(address, client_conn):
+    try:
+        try:
+            server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_conn.settimeout(TIMEOUT)
+            server_conn.connect(address)
+        except Exception as e:
+            logging.debug(e)
+            client_conn.sendall("HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            return
+
+        client_conn.settimeout(TIMEOUT)
+        server_conn.settimeout(TIMEOUT)
+
+        client_conn.sendall("HTTP/1.1 200 OK\r\n\r\n")
+
+        t = threading.Thread(target=fetch_response, args=(server_conn, client_conn, True))
+        t.daemon = True
+        t.start()
+
+        data = client_conn.recv(BUFSIZE)
+        while data:
+            server_conn.sendall(data)
+            data = client_conn.recv(BUFSIZE)
+
+        server_conn.shutdown(socket.SHUT_WR)
+        t.join()
 
     except Exception as e:
         logging.debug(e)
@@ -134,21 +175,34 @@ def handle_client(client_conn):
             logging.debug(e)
 
 
-def fetch_response(server_conn, client_conn):
+def handle_client(client_conn):
+    http_header = read_full_http_header(client_conn)
+    first_line = get_http_first_line(http_header)
+    logging.info(">>> %s", first_line)
+
+    address = get_server_address(http_header)
+
+    if not http_header.startswith("CONNECT"):
+        http_relay(address, http_header, client_conn)
+    else:
+        http_connect_tunneling(address, client_conn)
+
+
+def fetch_response(server_conn, client_conn, tunneling=False):
     try:
-        response_header = read_full_http_header(server_conn)
-        response_header = modify_http_header(response_header)
-        data = response_header
+        if not tunneling:
+            response_header = read_full_http_header(server_conn)
+            response_header = modify_http_header(response_header)
+            data = response_header
+        else:
+            data = server_conn.recv(BUFSIZE)
 
         while data:
             client_conn.sendall(data)
             data = server_conn.recv(BUFSIZE)
-
+        client_conn.shutdown(socket.SHUT_WR)
     except Exception as e:
         logging.debug(e)
-    finally:
-        server_conn.close()
-        client_conn.close()
 
 
 def check_usage():
