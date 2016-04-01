@@ -80,7 +80,7 @@ def wait_client(port):
 
         while True:
             conn, addr = server_socket.accept()
-            #logging.debug("Incoming connection from %s:%s" % (addr[0], addr[1]))
+            logging.debug("Incoming connection from %s:%s" % (addr[0], addr[1]))
 
             t = threading.Thread(target=handle_client, args=(conn,))
             t.daemon = True
@@ -158,6 +158,6 @@ def check_usage():
 
 if __name__ == "__main__":
     check_usage()
-    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG,
+    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO,
                         datefmt="%a, %d %b %Y %H:%M:%S")
     wait_client(int(sys.argv[1]))
