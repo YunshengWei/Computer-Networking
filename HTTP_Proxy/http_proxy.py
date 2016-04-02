@@ -103,8 +103,8 @@ def wait_client(port):
             logging.debug(e)
 
 
-def proxy(client_conn, server_conn):
-    t = threading.Thread(target=fetch_response, args=(server_conn, client_conn))
+def proxy(client_conn, server_conn, tunneling):
+    t = threading.Thread(target=fetch_response, args=(server_conn, client_conn, tunneling))
     t.daemon = True
     t.start()
 
@@ -113,8 +113,6 @@ def proxy(client_conn, server_conn):
         if not data:
             break
         server_conn.sendall(data)
-        print data
-        print "Client send to server %s" % (server_conn.getpeername(),)
 
     # Below are essential for elegant teardown.
     server_conn.shutdown(socket.SHUT_WR)
@@ -127,7 +125,6 @@ def handle_client(client_conn):
     logging.info(">>> %s", first_line)
 
     address = get_server_address(http_header)
-    print address
 
     try:
         server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -140,6 +137,7 @@ def handle_client(client_conn):
         if not http_header.startswith("CONNECT"):
             server_conn.connect(address)
             server_conn.sendall(modify_http_header(http_header))
+            proxy(client_conn, server_conn, False)
         else:
             try:
                 server_conn.connect(address)
@@ -148,8 +146,8 @@ def handle_client(client_conn):
                 client_conn.sendall("HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 return
             client_conn.sendall("HTTP/1.1 200 OK\r\n\r\n")
+            proxy(client_conn, server_conn, True)
 
-        proxy(client_conn, server_conn)
     except Exception as e:
         logging.debug(e)
     finally:
@@ -184,6 +182,6 @@ def check_usage():
 
 if __name__ == "__main__":
     check_usage()
-    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG,
+    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO,
                         datefmt="%a, %d %b %Y %H:%M:%S")
     wait_client(int(sys.argv[1]))
