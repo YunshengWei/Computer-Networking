@@ -103,76 +103,22 @@ def wait_client(port):
             logging.debug(e)
 
 
-def http_relay(address, http_header, client_conn):
-    try:
-        http_header = modify_http_header(http_header)
+def proxy(client_conn, server_conn):
+    t = threading.Thread(target=fetch_response, args=(server_conn, client_conn))
+    t.daemon = True
+    t.start()
 
-        server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_conn.connect(address)
-        # Set timeout here just in case either server or client doesn't close their socket.
-        # Theoretically, they should close.
-        client_conn.settimeout(TIMEOUT)
-        server_conn.settimeout(TIMEOUT)
-
-        t = threading.Thread(target=fetch_response, args=(server_conn, client_conn))
-        t.daemon = True
-        t.start()
-
-        data = http_header
-        while data:
-            server_conn.sendall(data)
-            data = client_conn.recv(BUFSIZE)
-
-        server_conn.shutdown(socket.SHUT_WR)
-
-        # This is essential for elegant teardown.
-        t.join()
-    except Exception as e:
-        logging.debug(e)
-    finally:
-        client_conn.close()
-        try:
-            server_conn.close()
-        except Exception as e:
-            logging.debug(e)
-
-
-def http_connect_tunneling(address, client_conn):
-    try:
-        try:
-            server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_conn.settimeout(TIMEOUT)
-            server_conn.connect(address)
-        except Exception as e:
-            logging.debug(e)
-            client_conn.sendall("HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            return
-
-        client_conn.settimeout(TIMEOUT)
-        server_conn.settimeout(TIMEOUT)
-
-        client_conn.sendall("HTTP/1.1 200 OK\r\n\r\n")
-
-        t = threading.Thread(target=fetch_response, args=(server_conn, client_conn, True))
-        t.daemon = True
-        t.start()
-
+    while True:
         data = client_conn.recv(BUFSIZE)
-        while data:
-            server_conn.sendall(data)
-            data = client_conn.recv(BUFSIZE)
+        if not data:
+            break
+        server_conn.sendall(data)
+        print data
+        print "Client send to server %s" % (server_conn.getpeername(),)
 
-        server_conn.shutdown(socket.SHUT_WR)
-        t.join()
-
-    except Exception as e:
-        logging.debug(e)
-    finally:
-        client_conn.close()
-        try:
-            server_conn.close()
-        except Exception as e:
-            logging.debug(e)
+    # Below are essential for elegant teardown.
+    server_conn.shutdown(socket.SHUT_WR)
+    t.join()
 
 
 def handle_client(client_conn):
@@ -181,11 +127,37 @@ def handle_client(client_conn):
     logging.info(">>> %s", first_line)
 
     address = get_server_address(http_header)
+    print address
 
-    if not http_header.startswith("CONNECT"):
-        http_relay(address, http_header, client_conn)
-    else:
-        http_connect_tunneling(address, client_conn)
+    try:
+        server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Set timeout here just in case either server or client doesn't close their socket.
+        # Theoretically, they should close.
+        client_conn.settimeout(TIMEOUT)
+        server_conn.settimeout(TIMEOUT)
+
+        if not http_header.startswith("CONNECT"):
+            server_conn.connect(address)
+            server_conn.sendall(modify_http_header(http_header))
+        else:
+            try:
+                server_conn.connect(address)
+            except Exception as e:
+                logging.debug(e)
+                client_conn.sendall("HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                return
+            client_conn.sendall("HTTP/1.1 200 OK\r\n\r\n")
+
+        proxy(client_conn, server_conn)
+    except Exception as e:
+        logging.debug(e)
+    finally:
+        client_conn.close()
+        try:
+            server_conn.close()
+        except Exception as e:
+            logging.debug(e)
 
 
 def fetch_response(server_conn, client_conn, tunneling=False):
@@ -212,6 +184,6 @@ def check_usage():
 
 if __name__ == "__main__":
     check_usage()
-    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO,
+    logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG,
                         datefmt="%a, %d %b %Y %H:%M:%S")
     wait_client(int(sys.argv[1]))
